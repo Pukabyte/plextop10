@@ -310,12 +310,24 @@ class PlexCollectionManager:
                     if current_items:
                         collection.removeItems(current_items)
                 except:
-                    # Create new collection with items
-                    collection = section.createCollection(title=collection_name, items=items)
-                    return  # Items are already added in order
+                    # Create new collection with first item
+                    collection = section.createCollection(title=collection_name, items=[items[0]])
+                    # Add remaining items
+                    if len(items) > 1:
+                        collection.addItems(items[1:])
+                else:
+                    # Add all items
+                    collection.addItems(items)
                 
-                # Add items in original order
-                collection.addItems(items)
+                # Now set the order of items
+                # Start with the second item since the first is already in position
+                for i in range(1, len(items)):
+                    # Get the current and previous items based on their original positions
+                    current_pos = positions[i]
+                    prev_pos = positions[i-1]
+                    # If current position is after previous position, move the item after the previous item
+                    if current_pos > prev_pos:
+                        collection.moveItem(items[i], after=items[i-1])
                 
                 logger.info(f"{Fore.GREEN}✨ Successfully updated collection with {len(items)} items{Style.RESET_ALL}")
             else:
