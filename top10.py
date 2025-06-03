@@ -12,6 +12,8 @@ from arrapi import RadarrAPI, SonarrAPI
 import re
 from difflib import SequenceMatcher
 from distutils.util import strtobool
+import json
+import tempfile
 
 # Initialize colorama
 init()
@@ -30,19 +32,29 @@ def clean_title(title: str) -> str:
     """Clean a title for better matching by removing common suffixes, years, etc."""
     # Remove year patterns like (2024) or [2024]
     title = re.sub(r'[\(\[\{].*?[\)\]\}]', '', title)
-    # Remove everything after colon (including the colon)
-    title = re.sub(r'\s*:.*$', '', title)
-    # Remove common suffixes after dash
-    title = re.sub(r'\s*-.*$', '', title)
     # Remove special characters and extra spaces
-    title = re.sub(r'[^\w\s]', '', title)
-    return title.lower().strip()
+    title = re.sub(r'[^\w\s:]', '', title)
+    # Convert to lowercase and strip whitespace
+    title = title.lower().strip()
+    # Create variations of the title (with and without subtitle)
+    base_title = re.sub(r'\s*:.*$', '', title)
+    return [title, base_title]
 
 def title_similarity(title1: str, title2: str) -> float:
     """Calculate similarity ratio between two titles."""
-    return SequenceMatcher(None, clean_title(title1), clean_title(title2)).ratio()
+    # Get all variations of both titles
+    titles1 = clean_title(title1)
+    titles2 = clean_title(title2)
+    
+    # Calculate similarity for all combinations and return the highest match
+    max_ratio = 0
+    for t1 in titles1:
+        for t2 in titles2:
+            ratio = SequenceMatcher(None, t1, t2).ratio()
+            max_ratio = max(max_ratio, ratio)
+    return max_ratio
 
-def is_valid_match(search_title: str, plex_item: Union[Movie, Show], min_similarity: float = 0.8) -> bool:
+def is_valid_match(search_title: str, plex_item: Union[Movie, Show], min_similarity: float = 0.6) -> bool:
     """
     Determine if a Plex item is a valid match for the search title.
     Uses title similarity and optionally checks year if available.
@@ -50,10 +62,12 @@ def is_valid_match(search_title: str, plex_item: Union[Movie, Show], min_similar
     # Calculate title similarity
     similarity = title_similarity(search_title, plex_item.title)
     
+    logger.debug(f"Title similarity between '{search_title}' and '{plex_item.title}': {similarity}")
+    
     if similarity < min_similarity:
         return False
         
-    # If we have an exact match, return True
+    # If we have an exact match or very high similarity, return True
     if similarity > 0.95:
         return True
         
@@ -241,7 +255,14 @@ class PlexCollectionManager:
 
     def _find_best_match(self, section, title: str) -> Optional[Union[Movie, Show]]:
         """Find the best matching item in the Plex library."""
+        # Try exact search first
         search_results = section.search(title)
+        
+        # If no results, try searching with just the part after colon
+        if not search_results and ':' in title:
+            subtitle = title.split(':', 1)[1].strip()
+            logger.debug(f"{Fore.CYAN}🔍 No results for '{title}', trying subtitle: '{subtitle}'{Style.RESET_ALL}")
+            search_results = section.search(subtitle)
         
         if not search_results:
             return None
@@ -249,9 +270,18 @@ class PlexCollectionManager:
         # Filter and sort results by similarity
         valid_matches = []
         for item in search_results:
-            if isinstance(item, (Movie, Show)) and is_valid_match(title, item):
+            if isinstance(item, (Movie, Show)):
                 similarity = title_similarity(title, item.title)
-                valid_matches.append((similarity, item))
+                logger.debug(f"{Fore.CYAN}🔍 Comparing '{title}' with '{item.title}' - Similarity: {similarity}{Style.RESET_ALL}")
+                if similarity >= 0.6:  # Lowered threshold for better matching
+                    valid_matches.append((similarity, item))
+                # Also try matching with just the subtitle if there's a colon
+                if ':' in title:
+                    subtitle = title.split(':', 1)[1].strip()
+                    subtitle_similarity = title_similarity(subtitle, item.title)
+                    logger.debug(f"{Fore.CYAN}🔍 Comparing subtitle '{subtitle}' with '{item.title}' - Similarity: {subtitle_similarity}{Style.RESET_ALL}")
+                    if subtitle_similarity >= 0.8:  # Higher threshold for subtitle-only matches
+                        valid_matches.append((subtitle_similarity, item))
         
         # Sort by similarity score
         valid_matches.sort(reverse=True, key=lambda x: x[0])
@@ -329,6 +359,31 @@ class PlexCollectionManager:
                     if current_pos > prev_pos:
                         collection.moveItem(items[i], after=items[i-1])
                 
+                # Set the collection poster
+                try:
+                    # Extract service name from collection name (e.g., "Netflix Top 10" -> "netflix")
+                    service = collection_name.split()[0].lower()
+                    # Map service names to URL format
+                    service_map = {
+                        'netflix': 'netflix',
+                        'disney+': 'disney',
+                        'prime': 'prime',
+                        'max': 'max',
+                        'apple': 'apple',
+                        'paramount+': 'paramount'
+                    }
+                    if service in service_map:
+                        poster_url = f"https://raw.githubusercontent.com/Kometa-Team/Default-Images/master/chart/{service_map[service]}_top_10.jpg"
+                        try:
+                            response = requests.get(poster_url)
+                            response.raise_for_status()
+                            collection.uploadPoster(url=poster_url)
+                            logger.info(f"{Fore.GREEN}🖼️ Successfully set collection poster{Style.RESET_ALL}")
+                        except Exception as e:
+                            logger.error(f"{Fore.RED}❌ Error setting collection poster: {str(e)}{Style.RESET_ALL}")
+                except Exception as e:
+                    logger.error(f"{Fore.RED}❌ Error processing collection poster: {str(e)}{Style.RESET_ALL}")
+                
                 logger.info(f"{Fore.GREEN}✨ Successfully updated collection with {len(items)} items{Style.RESET_ALL}")
             else:
                 logger.warning(f"{Fore.YELLOW}⚠️  No matching items found for collection{Style.RESET_ALL}")
@@ -342,7 +397,7 @@ class PlexCollectionManager:
             try:
                 section = self.plex.library.section(section_name)
                 for service, titles in content['movies'].items():
-                    collection_name = f"{service} Top 10"
+                    collection_name = f"{service} Top 10 Movies"
                     self._update_collection(section, collection_name, titles)
             except Exception as e:
                 logger.error(f"{Fore.RED}❌ Error processing movie section {section_name}: {str(e)}{Style.RESET_ALL}")
@@ -352,26 +407,243 @@ class PlexCollectionManager:
             try:
                 section = self.plex.library.section(section_name)
                 for service, titles in content['shows'].items():
-                    collection_name = f"{service} Top 10"
+                    collection_name = f"{service} Top 10 Shows"
                     self._update_collection(section, collection_name, titles)
             except Exception as e:
                 logger.error(f"{Fore.RED}❌ Error processing show section {section_name}: {str(e)}{Style.RESET_ALL}")
 
+class JellyfinCollectionManager:
+    def __init__(self):
+        self.jellyfin_url = os.getenv('JELLYFIN_URL')
+        self.jellyfin_api_key = os.getenv('JELLYFIN_API_KEY')
+        self.movies_sections = [section.strip() for section in os.getenv('JELLYFIN_LIBRARY_MOVIES', '').split(',')]
+        self.shows_sections = [section.strip() for section in os.getenv('JELLYFIN_LIBRARY_SHOWS', '').split(',')]
+        self.session = None
+        self.user_id = None
+        self.arr_manager = ArrManager()
+        self.search_missing = bool(strtobool(os.getenv('SEARCH_MISSING', 'false')))
+        if self.jellyfin_url and self.jellyfin_api_key:
+            self._connect()
+
+    def _connect(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'X-Emby-Token': self.jellyfin_api_key,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        })
+        # Get the first user (admin or first user)
+        users_url = f"{self.jellyfin_url.rstrip('/')}/Users"
+        resp = self.session.get(users_url)
+        resp.raise_for_status()
+        users = resp.json()
+        if users:
+            self.user_id = users[0]['Id']
+
+    def _find_best_match(self, items, title: str):
+        best_match = None
+        best_score = 0
+        for item in items:
+            score = title_similarity(title, item['Name'])
+            if score > best_score:
+                best_score = score
+                best_match = item
+        return best_match if best_score >= 0.6 else None
+
+    def _get_section_id(self, section_name, item_type):
+        # Get all libraries (views)
+        url = f"{self.jellyfin_url.rstrip('/')}/Users/{self.user_id}/Views"
+        resp = self.session.get(url)
+        resp.raise_for_status()
+        views = resp.json().get('Items', [])
+        for view in views:
+            if view['Name'].lower() == section_name.lower() and view['CollectionType'].lower() == item_type.lower():
+                return view['Id']
+        return None
+
+    def _get_items(self, section_id, item_type):
+        url = f"{self.jellyfin_url.rstrip('/')}/Users/{self.user_id}/Items"
+        params = {
+            'ParentId': section_id,
+            'IncludeItemTypes': item_type,
+            'Recursive': 'true',
+            'Fields': 'BasicSyncInfo',
+        }
+        resp = self.session.get(url, params=params)
+        resp.raise_for_status()
+        return resp.json().get('Items', [])
+
+    def sanitize_collection_name(self, name):
+        # Replace any character that is not alphanumeric, space, dash, or underscore with an underscore
+        return re.sub(r'[^\w\- ]', '_', name)
+
+    def _get_collection_id(self, collection_name):
+        url = f"{self.jellyfin_url.rstrip('/')}/Users/{self.user_id}/Items"
+        params = {
+            'IncludeItemTypes': 'BoxSet',
+            'SearchTerm': collection_name,
+        }
+        resp = self.session.get(url, params=params)
+        resp.raise_for_status()
+        items = resp.json().get('Items', [])
+        for item in items:
+            if item['Name'].lower() == collection_name.lower():
+                return item['Id']
+        return None
+
+    def _create_collection(self, collection_name):
+        url = f"{self.jellyfin_url.rstrip('/')}/Collections"
+        params = {"Name": collection_name, "UserId": str(self.user_id), "IsLocked": "true"}
+        logger.info(f"\n{Fore.BLUE}📌 Creating collection: {Fore.YELLOW}{collection_name}{Style.RESET_ALL}")
+        resp = self.session.post(url, params=params)
+        logger.info(f"{Fore.CYAN}🆔 Collection ID: {Fore.YELLOW}{resp.json().get('Id', 'N/A')}{Style.RESET_ALL}")
+        logger.info(f"{Fore.CYAN}Response status: {resp.status_code}, text: {resp.text}{Style.RESET_ALL}")
+        resp.raise_for_status()
+        return resp.json()['Id']
+
+    def _refresh_library(self):
+        try:
+            url = f"{self.jellyfin_url.rstrip('/')}/Library/Refresh"
+            logger.info(f"[Jellyfin] Triggering library scan...")
+            resp = self.session.post(url)
+            logger.info(f"[Jellyfin] Library scan response: {resp.status_code}, text: {resp.text}")
+            assert resp.status_code in (200, 204), f"Unexpected status code: {resp.status_code}"
+        except Exception as e:
+            logger.error(f"[Jellyfin] Error triggering library scan: {str(e)}")
+
+    def _get_collection_items(self, collection_id):
+        url = f"{self.jellyfin_url.rstrip('/')}/Users/{self.user_id}/Items"
+        params = {
+            'ParentId': collection_id,
+            'Recursive': 'true',
+        }
+        try:
+            resp = self.session.get(url, params=params)
+            resp.raise_for_status()
+            return [item['Id'] for item in resp.json().get('Items', [])]
+        except Exception as e:
+            logger.error(f"[Jellyfin] Error fetching items in collection {collection_id}: {str(e)}")
+            return []
+
+    def _clear_collection_items(self, collection_id):
+        item_ids = self._get_collection_items(collection_id)
+        if not item_ids:
+            logger.info(f"{Fore.YELLOW}⚠️  No items to remove from collection {collection_id}{Style.RESET_ALL}")
+            return
+        url = f"{self.jellyfin_url.rstrip('/')}/Collections/{collection_id}/Items"
+        data = {'Ids': item_ids}
+        try:
+            resp = self.session.delete(url, json=data)
+            logger.info(f"{Fore.CYAN}🗑️ Remove-items response: {resp.status_code}, text: {resp.text}{Style.RESET_ALL}")
+            assert resp.status_code in (200, 204), f"Unexpected status code: {resp.status_code}"
+        except Exception as e:
+            logger.error(f"{Fore.RED}❌ Error removing items from collection: {str(e)}{Style.RESET_ALL}")
+
+    def _update_collection(self, collection_id, item_ids):
+        self._clear_collection_items(collection_id)
+        url = f"{self.jellyfin_url.rstrip('/')}/Collections/{collection_id}/Items"
+        params = {'Ids': ','.join(str(i) for i in item_ids)}
+        logger.info(f"{Fore.CYAN}➕ Adding items to collection {Fore.YELLOW}{collection_id}{Fore.CYAN}: {item_ids}{Style.RESET_ALL}")
+        try:
+            resp = self.session.post(url, params=params)
+            logger.info(f"{Fore.CYAN}Add-items response: {resp.status_code}, text: {resp.text}{Style.RESET_ALL}")
+            assert resp.status_code in (200, 204), f"Unexpected status code: {resp.status_code}"
+        except Exception as e:
+            logger.error(f"{Fore.RED}❌ Error adding items to collection: {str(e)}{Style.RESET_ALL}")
+
+    def _update_collection_for_section(self, section_id, collection_name, titles, item_type):
+        try:
+            logger.info(f"\n{Fore.BLUE}📌 Updating collection: {Fore.YELLOW}{collection_name}{Fore.BLUE} in section: {Fore.YELLOW}{section_id}{Style.RESET_ALL}")
+            items = self._get_items(section_id, item_type)
+            matched = []  # (pos, id, title)
+            unmatched_titles = []
+            for pos, title in titles:
+                match = self._find_best_match(items, title)
+                if match:
+                    matched.append((pos, match['Id'], match['Name']))
+                    logger.info(f"{Fore.CYAN}🔍 Matched '{title}' to '{match['Name']}'{Style.RESET_ALL}")
+                else:
+                    unmatched_titles.append((pos, title))
+            if matched:
+                logger.info(f"{Fore.GREEN}✅ Found matches:{Style.RESET_ALL}")
+                for pos, _, matched_name in sorted(matched, key=lambda x: x[0]):
+                    logger.info(f"{Fore.GREEN}    #{pos}: {matched_name}{Style.RESET_ALL}")
+            if unmatched_titles:
+                logger.info(f"{Fore.RED}❌ Missing matches:{Style.RESET_ALL}")
+                for pos, title in unmatched_titles:
+                    logger.info(f"{Fore.RED}    #{pos}: {title}{Style.RESET_ALL}")
+                if self.search_missing:
+                    logger.info(f"\n{Fore.BLUE}🔍 Searching for missing titles in Radarr/Sonarr...{Style.RESET_ALL}")
+                    for pos, title in unmatched_titles:
+                        if item_type.lower() == 'movie':
+                            self.arr_manager.search_movie(title)
+                        else:
+                            self.arr_manager.search_show(title)
+                else:
+                    logger.info(f"\n{Fore.YELLOW}ℹ️ Skipping search for missing titles (SEARCH_MISSING is disabled){Style.RESET_ALL}")
+            if matched:
+                # Sort by ranking position
+                matched_sorted = sorted(matched, key=lambda x: x[0])
+                matched_ids = [mid for _, mid, _ in matched_sorted]
+                collection_id = self._get_collection_id(collection_name)
+                if collection_id:
+                    self._update_collection(collection_id, matched_ids)
+                else:
+                    collection_id = self._create_collection(collection_name)
+                    self._update_collection(collection_id, matched_ids)
+                logger.info(f"{Fore.GREEN}✨ Successfully updated collection with {len(matched_ids)} items{Style.RESET_ALL}")
+            else:
+                logger.warning(f"{Fore.YELLOW}⚠️  No matching items found for collection{Style.RESET_ALL}")
+        except Exception as e:
+            logger.error(f"{Fore.RED}❌ Error updating collection: {str(e)}{Style.RESET_ALL}")
+
+    def update_collections(self, content):
+        # Movies
+        for section_name in self.movies_sections:
+            section_id = self._get_section_id(section_name, 'movies')
+            if section_id:
+                for service, titles in content['movies'].items():
+                    collection_name = f"{service} Top 10 Movies"
+                    self._update_collection_for_section(section_id, collection_name, titles, 'Movie')
+        # Shows
+        for section_name in self.shows_sections:
+            section_id = self._get_section_id(section_name, 'tvshows')
+            if section_id:
+                for service, titles in content['shows'].items():
+                    collection_name = f"{service} Top 10 Shows"
+                    self._update_collection_for_section(section_id, collection_name, titles, 'Series')
+
 def main():
     try:
-        # Initialize scraper and Plex manager
+        # Check enable/disable variables
+        enable_plex = os.getenv('ENABLE_PLEX', 'true').lower() == 'true'
+        enable_jellyfin = os.getenv('ENABLE_JELLYFIN', 'false').lower() == 'true'
+
+        # Initialize scraper
         scraper = FlixPatrolScraper()
-        plex_manager = PlexCollectionManager()
+        plex_manager = None
+        jellyfin_manager = None
+
+        if enable_plex and os.getenv('PLEX_URL') and os.getenv('PLEX_TOKEN'):
+            plex_manager = PlexCollectionManager()
+        if enable_jellyfin and os.getenv('JELLYFIN_URL') and os.getenv('JELLYFIN_API_KEY'):
+            jellyfin_manager = JellyfinCollectionManager()
 
         # Get content from FlixPatrol
         logger.info(f"\n{Fore.CYAN}🌐 Scraping FlixPatrol for top content...{Style.RESET_ALL}")
         content = scraper.get_top_content()
 
-        # Update Plex collections
-        logger.info(f"\n{Fore.CYAN}🔄 Updating Plex collections...{Style.RESET_ALL}")
-        plex_manager.update_collections(content)
+        # Update Plex collections if enabled
+        if plex_manager:
+            logger.info(f"\n{Fore.CYAN}🔄 Updating Plex collections...{Style.RESET_ALL}")
+            plex_manager.update_collections(content)
 
-        logger.info(f"\n{Fore.GREEN}✅ Successfully completed updating Plex collections{Style.RESET_ALL}")
+        # Update Jellyfin collections if enabled
+        if jellyfin_manager:
+            logger.info(f"\n{Fore.CYAN}🔄 Updating Jellyfin collections...{Style.RESET_ALL}")
+            jellyfin_manager.update_collections(content)
+
+        logger.info(f"\n{Fore.GREEN}✅ Successfully completed updating collections{Style.RESET_ALL}")
 
     except Exception as e:
         logger.error(f"\n{Fore.RED}❌ Error in main execution: {str(e)}{Style.RESET_ALL}")

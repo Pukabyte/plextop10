@@ -20,8 +20,6 @@ This script automatically creates and updates Plex collections based on the curr
 
 - Python 3.7+
 - Plex Media Server
-- Plex authentication token
-- Internet connection to access FlixPatrol
 
 ## Installation
 
