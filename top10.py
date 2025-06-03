@@ -496,8 +496,6 @@ class JellyfinCollectionManager:
         params = {"Name": collection_name, "UserId": str(self.user_id), "IsLocked": "true"}
         logger.info(f"\n{Fore.BLUE}📌 Creating collection: {Fore.YELLOW}{collection_name}{Style.RESET_ALL}")
         resp = self.session.post(url, params=params)
-        logger.info(f"{Fore.CYAN}🆔 Collection ID: {Fore.YELLOW}{resp.json().get('Id', 'N/A')}{Style.RESET_ALL}")
-        logger.info(f"{Fore.CYAN}Response status: {resp.status_code}, text: {resp.text}{Style.RESET_ALL}")
         resp.raise_for_status()
         return resp.json()['Id']
 
@@ -534,7 +532,6 @@ class JellyfinCollectionManager:
         data = {'Ids': item_ids}
         try:
             resp = self.session.delete(url, json=data)
-            logger.info(f"{Fore.CYAN}🗑️ Remove-items response: {resp.status_code}, text: {resp.text}{Style.RESET_ALL}")
             assert resp.status_code in (200, 204), f"Unexpected status code: {resp.status_code}"
         except Exception as e:
             logger.error(f"{Fore.RED}❌ Error removing items from collection: {str(e)}{Style.RESET_ALL}")
@@ -546,7 +543,6 @@ class JellyfinCollectionManager:
         logger.info(f"{Fore.CYAN}➕ Adding items to collection {Fore.YELLOW}{collection_id}{Fore.CYAN}: {item_ids}{Style.RESET_ALL}")
         try:
             resp = self.session.post(url, params=params)
-            logger.info(f"{Fore.CYAN}Add-items response: {resp.status_code}, text: {resp.text}{Style.RESET_ALL}")
             assert resp.status_code in (200, 204), f"Unexpected status code: {resp.status_code}"
         except Exception as e:
             logger.error(f"{Fore.RED}❌ Error adding items to collection: {str(e)}{Style.RESET_ALL}")
@@ -585,12 +581,12 @@ class JellyfinCollectionManager:
                 # Sort by ranking position
                 matched_sorted = sorted(matched, key=lambda x: x[0])
                 matched_ids = [mid for _, mid, _ in matched_sorted]
-                collection_id = self._get_collection_id(collection_name)
-                if collection_id:
-                    self._update_collection(collection_id, matched_ids)
-                else:
-                    collection_id = self._create_collection(collection_name)
-                    self._update_collection(collection_id, matched_ids)
+            collection_id = self._get_collection_id(collection_name)
+            if collection_id:
+                self._update_collection(collection_id, matched_ids)
+            else:
+                collection_id = self._create_collection(collection_name)
+                self._update_collection(collection_id, matched_ids)
                 logger.info(f"{Fore.GREEN}✨ Successfully updated collection with {len(matched_ids)} items{Style.RESET_ALL}")
             else:
                 logger.warning(f"{Fore.YELLOW}⚠️  No matching items found for collection{Style.RESET_ALL}")
