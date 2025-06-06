@@ -448,7 +448,11 @@ class JellyfinCollectionManager:
             if score > best_score:
                 best_score = score
                 best_match = item
-        return best_match if best_score >= 0.6 else None
+        if best_match and best_score >= 0.6:
+            logger.info(f"{Fore.CYAN}🔍 Matched '{title}' to '{best_match['Name']}' (Type: {best_match.get('Type')}, ID: {best_match['Id']}){Style.RESET_ALL}")
+            return best_match
+        logger.warning(f"{Fore.RED}❌ No match found for '{title}' in Jellyfin{Style.RESET_ALL}")
+        return None
 
     def _get_section_id(self, section_name, item_type):
         # Get all libraries (views)
@@ -581,12 +585,12 @@ class JellyfinCollectionManager:
                 # Sort by ranking position
                 matched_sorted = sorted(matched, key=lambda x: x[0])
                 matched_ids = [mid for _, mid, _ in matched_sorted]
-            collection_id = self._get_collection_id(collection_name)
-            if collection_id:
-                self._update_collection(collection_id, matched_ids)
-            else:
-                collection_id = self._create_collection(collection_name)
-                self._update_collection(collection_id, matched_ids)
+                collection_id = self._get_collection_id(collection_name)
+                if collection_id:
+                    self._update_collection(collection_id, matched_ids)
+                else:
+                    collection_id = self._create_collection(collection_name)
+                    self._update_collection(collection_id, matched_ids)
                 logger.info(f"{Fore.GREEN}✨ Successfully updated collection with {len(matched_ids)} items{Style.RESET_ALL}")
             else:
                 logger.warning(f"{Fore.YELLOW}⚠️  No matching items found for collection{Style.RESET_ALL}")
